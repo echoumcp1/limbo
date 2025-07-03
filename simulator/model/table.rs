@@ -185,58 +185,10 @@ impl From<ast::Literal> for SimValue {
     }
 }
 
-/// Converts a SQL string literal with already-escaped single quotes to a regular string by:
-/// - Removing the enclosing single quotes
-/// - Converting sequences of 2N single quotes ('''''') to N single quotes (''')
-///
-/// Assumes:
-/// - The input starts and ends with a single quote
-/// - The input contains a valid amount of single quotes inside the enclosing quotes;
-///   i.e. any ' is escaped as a double ''
-fn unescape_singlequotes(input: &str) -> String {
-    assert!(
-        input.starts_with('\'') && input.ends_with('\''),
-        "Input string must be wrapped in single quotes"
-    );
-    // Skip first and last characters (the enclosing quotes)
-    let inner = &input[1..input.len() - 1];
-
-    let mut result = String::with_capacity(inner.len());
-    let mut chars = inner.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\'' {
-            // Count consecutive single quotes
-            let mut quote_count = 1;
-            while chars.peek() == Some(&'\'') {
-                quote_count += 1;
-                chars.next();
-            }
-            assert!(
-                quote_count % 2 == 0,
-                "Expected even number of quotes, got {} in string {}",
-                quote_count,
-                input
-            );
-            // For every pair of quotes, output one quote
-            for _ in 0..(quote_count / 2) {
-                result.push('\'');
-            }
-        } else {
-            result.push(c);
-        }
-    }
-
-    result
-}
-
-/// Escapes a string by doubling contained single quotes and then wrapping it in single quotes.
-fn escape_singlequotes(input: &str) -> String {
-    let mut result = String::with_capacity(input.len() + 2);
-    result.push('\'');
-    result.push_str(&input.replace("'", "''"));
-    result.push('\'');
-    result
+/// Sanitaizes a string literal by removing single quote at front and back
+/// and escaping double single quotes
+fn sanitize_string(input: &str) -> String {
+     input[1..input.len() - 1].replace("''", "'").to_string()
 }
 
 impl From<&ast::Literal> for SimValue {
@@ -244,7 +196,8 @@ impl From<&ast::Literal> for SimValue {
         let new_value = match value {
             ast::Literal::Null => types::Value::Null,
             ast::Literal::Numeric(number) => Numeric::from(number).into(),
-            ast::Literal::String(string) => types::Value::build_text(unescape_singlequotes(string)),
+            // TODO: see how to avoid sanitizing here
+            ast::Literal::String(string) => types::Value::build_text(sanitize_string(string)),
             ast::Literal::Blob(blob) => types::Value::Blob(
                 blob.as_bytes()
                     .chunks_exact(2)
@@ -274,7 +227,7 @@ impl From<&SimValue> for ast::Literal {
             types::Value::Null => Self::Null,
             types::Value::Integer(i) => Self::Numeric(i.to_string()),
             types::Value::Float(f) => Self::Numeric(f.to_string()),
-            text @ types::Value::Text(..) => Self::String(escape_singlequotes(&text.to_string())),
+            text @ types::Value::Text(..) => Self::String(format!("'{}'", text)),
             types::Value::Blob(blob) => Self::Blob(hex::encode(blob)),
         }
     }
@@ -311,34 +264,5 @@ impl From<turso_core::types::Value> for SimValue {
 impl From<&turso_core::types::Value> for SimValue {
     fn from(value: &turso_core::types::Value) -> Self {
         Self(value.clone())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::model::table::{escape_singlequotes, unescape_singlequotes};
-
-    #[test]
-    fn test_unescape_singlequotes() {
-        assert_eq!(unescape_singlequotes("'hello'"), "hello");
-        assert_eq!(unescape_singlequotes("'O''Reilly'"), "O'Reilly");
-        assert_eq!(
-            unescape_singlequotes("'multiple''single''quotes'"),
-            "multiple'single'quotes"
-        );
-        assert_eq!(unescape_singlequotes("'test''''test'"), "test''test");
-        assert_eq!(unescape_singlequotes("'many''''''quotes'"), "many'''quotes");
-    }
-
-    #[test]
-    fn test_escape_singlequotes() {
-        assert_eq!(escape_singlequotes("hello"), "'hello'");
-        assert_eq!(escape_singlequotes("O'Reilly"), "'O''Reilly'");
-        assert_eq!(
-            escape_singlequotes("multiple'single'quotes"),
-            "'multiple''single''quotes'"
-        );
-        assert_eq!(escape_singlequotes("test''test"), "'test''''test'");
-        assert_eq!(escape_singlequotes("many'''quotes"), "'many''''''quotes'");
     }
 }
